@@ -1,858 +1,2643 @@
-# app.py
 import os
-import json
-import uuid
-import sqlite3
-import math
+
 import re
-from datetime import datetime, date, timedelta
+
+import json
+
+import uuid
+
+import time
+
+import sqlite3
+
+from datetime import datetime, date
+
+from typing import Any, Dict, List, Optional, Tuple
+
+
 
 import pandas as pd
+
 import streamlit as st
-import plotly.express as px
+
+
+
+from sklearn.feature_extraction.text import TfidfVectorizer
+
+from sklearn.metrics.pairwise import cosine_similarity
+
+
+
+# ----------------------------
+
+# OpenAI client (requires openai>=1.0.0)
+
+# ----------------------------
+
+try:
+
+from openai import OpenAI
+
+except Exception:
+
+OpenAI = None
+
+
+
+
 
 # ============================
-# 1. 앱 설정 및 상수
+
+# App Config
+
 # ============================
-DB_PATH = "metatone_pro.db"
+
+APP_TITLE = "MetaTone — 성장 기록 기반 소프트스킬 트래커 (MVP)"
+
+DB_PATH = "metatone.db"
+
+
+
+DEFAULT_MODEL = "gpt-4o-mini"
+
+MODEL_OPTIONS = [DEFAULT_MODEL, "gpt-4.1-mini", "gpt-4o"]
+
+
 
 SOFT_SKILLS = ["문제해결", "의사소통", "협업", "리더십", "자기관리/회복탄력성", "학습역량"]
-CATEGORIES = ["학습", "프로젝트", "리더십·동아리", "대외활동", "관계·협업", "생활·루틴"]
 
-# 주간 단위(사용자 확정)
-# - goal_week: "YYYY-Www" 형태로 저장
-def iso_week_key(d: date) -> str:
-    y, w, _ = d.isocalendar()
-    return f"{y}-W{w:02d}"
 
-# 템플릿(사용자 확정 5-1)
-TEMPLATES = {
-    "자유 기록": {
-        "behavior_label": "1. 행동 (Behavior)",
-        "behavior_ph": "예: 팀 프로젝트 회의에서 갈등을 중재하고 일정을 다시 짰습니다.",
-        "emotion_label": "2. 감정 (Emotion)",
-        "emotion_ph": "예: 처음엔 당황스러웠지만 점차 책임감을 느꼈습니다.",
-        "result_label": "3. 결과 (Result)",
-        "result_ph": "예: 지연되었던 일정을 3일 단축했고 팀 분위기가 좋아졌습니다.",
-    },
-    "갈등 중재": {
-        "behavior_label": "1. 행동 (갈등 상황에서 내가 한 말/행동)",
-        "behavior_ph": "예: A와 B의 의견 차이를 정리해 쟁점을 2개로 나누고, 합의 가능한 기준부터 제안했습니다.",
-        "emotion_label": "2. 감정 (내 감정 + 상대 반응)",
-        "emotion_ph": "예: 답답했지만 침착하려고 했고, 상대는 방어적으로 반응했습니다.",
-        "result_label": "3. 결과 (관계/결정/성과 측면)",
-        "result_ph": "예: 결론은 늦어졌지만 기준이 생겨 이후 충돌이 줄었습니다.",
-    },
-    "마감/압박": {
-        "behavior_label": "1. 행동 (압박 속에서 취한 전략)",
-        "behavior_ph": "예: 일정이 밀려 우선순위를 재정의하고, 핵심 산출물부터 완성했습니다.",
-        "emotion_label": "2. 감정 (스트레스/집중/회복)",
-        "emotion_ph": "예: 불안했지만 체크리스트가 생기니 안정됐습니다.",
-        "result_label": "3. 결과 (품질/속도/학습)",
-        "result_ph": "예: 품질을 유지하면서 마감에 맞췄고, 다음엔 사전 리스크 체크가 필요함을 느꼈습니다.",
-    },
-    "피드백 주고받기": {
-        "behavior_label": "1. 행동 (피드백을 어떻게 전달/수용했나)",
-        "behavior_ph": "예: 사실-영향-요청 구조로 피드백을 주고, 반박 대신 질문으로 확인했습니다.",
-        "emotion_label": "2. 감정 (불편함/수용/방어)",
-        "emotion_ph": "예: 서운했지만 성장 기회로 해석하려고 했습니다.",
-        "result_label": "3. 결과 (관계/성과/다음 액션)",
-        "result_ph": "예: 관계는 유지됐고, 다음 회의부터 합의된 기준으로 진행했습니다.",
-    },
-    "리더 역할": {
-        "behavior_label": "1. 행동 (리더로서 의사결정/조율/지원)",
-        "behavior_ph": "예: 역할 분담을 재정의하고, 병목을 맡아 해결했습니다.",
-        "emotion_label": "2. 감정 (책임/부담/동기)",
-        "emotion_ph": "예: 부담이 컸지만 팀이 안정되는 느낌이 있었습니다.",
-        "result_label": "3. 결과 (팀/성과/학습)",
-        "result_ph": "예: 일정이 안정됐고, 다음엔 초기에 기준/리스크를 더 명확히 해야 함을 배웠습니다.",
-    },
+
+CATEGORIES = ["학습(수업/자격증/독서)", "프로젝트", "리더십·동아리", "대외활동", "관계·협업", "생활·루틴"]
+
+ANALYSIS_ENGINES = ["무료(로컬) — 규칙/TF-IDF", "LLM(OpenAI)"]
+
+DEFAULT_ENGINE = ANALYSIS_ENGINES[0]
+
+
+
+SKILL_CONCEPTS = {
+
+"문제해결": "문제를 정의하고 원인을 파악해 실행 가능한 대안을 만들고 검증하는 역량",
+
+"의사소통": "상대의 이해를 기준으로 정보를 구조화·전달하고 합의를 이끌어내는 역량",
+
+"협업": "역할·의존성을 맞추고 상호 신뢰를 바탕으로 성과를 함께 만드는 역량",
+
+"리더십": "방향을 제시하고 의사결정을 돕고 구성원이 움직이게 만드는 영향력",
+
+"자기관리/회복탄력성": "에너지·감정·시간을 관리하며 압박 속에서도 회복하고 지속하는 역량",
+
+"학습역량": "학습 목표를 세우고 피드백을 통해 지식을 내 것으로 만드는 역량",
+
 }
 
-# LLM 모델(분석/정체성/한줄피드백)
-MODEL_ANALYZE = "gpt-4o-mini"
-MODEL_ONE_LINER = "gpt-4o-mini"
-MODEL_IDENTITY = "gpt-4o-mini"
+
+
+# 2+2 메모 기본 개수
+
+PRACTICE_N = 2
+
+QUESTION_N = 2
+
+
+
+
 
 # ============================
-# 2. 데이터베이스 레이어
-# ============================
-def get_conn():
-    return sqlite3.connect(DB_PATH, check_same_thread=False)
 
-def _col_exists(conn, table: str, col: str) -> bool:
-    cur = conn.cursor()
-    cur.execute(f"PRAGMA table_info({table})")
-    cols = [r[1] for r in cur.fetchall()]
-    return col in cols
-
-def init_db():
-    with get_conn() as conn:
-        cur = conn.cursor()
-
-        # 메인 기록 테이블 (기존 스키마 + template_name, mood)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS entries (
-            id TEXT PRIMARY KEY,
-            entry_date TEXT,
-            category TEXT,
-            template_name TEXT,
-            mood INTEGER,
-            behavior TEXT,
-            emotion TEXT,
-            result TEXT,
-            analysis_json TEXT,
-            top_skill TEXT
-        )""")
-
-        # 성장 루틴(2+2 메모) 테이블 + 이번 주 목표
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS growth_notes (
-            id TEXT PRIMARY KEY,
-            entry_id TEXT,
-            note_type TEXT, -- 'practice', 'question'
-            content TEXT,
-            user_memo TEXT,
-            is_completed INTEGER DEFAULT 0,
-            is_weekly_goal INTEGER DEFAULT 0,
-            goal_week TEXT,
-            FOREIGN KEY(entry_id) REFERENCES entries(id) ON DELETE CASCADE
-        )""")
-
-        # 정체성 문장(6-1)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS identity_statement (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            content TEXT,
-            updated_at TEXT,
-            is_pinned INTEGER DEFAULT 0
-        )""")
-        # 기본 row 확보
-        cur.execute("INSERT OR IGNORE INTO identity_statement (id, content, updated_at, is_pinned) VALUES (1, '', '', 0)")
-
-        conn.commit()
-
-def bump_db_version():
-    st.session_state["db_ver"] = st.session_state.get("db_ver", 0) + 1
-
-@st.cache_data
-def fetch_entries(db_ver: int):
-    with get_conn() as conn:
-        return pd.read_sql_query("SELECT * FROM entries ORDER BY entry_date DESC", conn)
-
-@st.cache_data
-def fetch_growth_notes(db_ver: int):
-    with get_conn() as conn:
-        return pd.read_sql_query("SELECT * FROM growth_notes", conn)
-
-def get_identity():
-    with get_conn() as conn:
-        row = conn.execute("SELECT content, updated_at, is_pinned FROM identity_statement WHERE id=1").fetchone()
-    return {"content": row[0] or "", "updated_at": row[1] or "", "is_pinned": int(row[2] or 0)}
-
-def set_identity(content: str, is_pinned: int):
-    with get_conn() as conn:
-        conn.execute(
-            "UPDATE identity_statement SET content=?, updated_at=?, is_pinned=? WHERE id=1",
-            (content, datetime.now().isoformat(timespec="seconds"), int(is_pinned)),
-        )
-    bump_db_version()
+# DB Utilities
 
 # ============================
-# 3. 분석 로직 (LLM)
+
+def get_conn() -> sqlite3.Connection:
+
+return sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10)
+
+
+
+
+
+def init_db() -> None:
+
+with get_conn() as conn:
+
+cur = conn.cursor()
+
+cur.execute("PRAGMA journal_mode=WAL;")
+
+cur.execute("PRAGMA synchronous=NORMAL;")
+
+
+
+# entries (기존 스키마 유지: tags/title은 MetaTone에서 미사용)
+
+cur.execute("""
+
+CREATE TABLE IF NOT EXISTS entries (
+
+id TEXT PRIMARY KEY,
+
+created_at TEXT NOT NULL,
+
+entry_date TEXT NOT NULL,
+
+category TEXT,
+
+tags TEXT,
+
+title TEXT,
+
+raw_text TEXT NOT NULL,
+
+artifacts TEXT,
+
+analysis_json TEXT
+
+)
+
+""")
+
+
+
+# notes: entry_id + skill_name 단위로, practice/question 각각 0..1 저장
+
+cur.execute("""
+
+CREATE TABLE IF NOT EXISTS skill_notes (
+
+id TEXT PRIMARY KEY,
+
+entry_id TEXT NOT NULL,
+
+entry_date TEXT NOT NULL,
+
+skill_name TEXT NOT NULL,
+
+note_type TEXT NOT NULL, -- 'practice' | 'question'
+
+item_index INTEGER NOT NULL, -- 0..1
+
+item_text TEXT NOT NULL,
+
+memo_text TEXT,
+
+created_at TEXT NOT NULL,
+
+updated_at TEXT NOT NULL,
+
+UNIQUE(entry_id, skill_name, note_type, item_index)
+
+)
+
+""")
+
+
+
+conn.commit()
+
+
+
+
+
+def insert_entry(entry: Dict[str, Any]) -> None:
+
+with get_conn() as conn:
+
+cur = conn.cursor()
+
+cur.execute("""
+
+INSERT INTO entries (id, created_at, entry_date, category, tags, title, raw_text, artifacts, analysis_json)
+
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+
+""", (
+
+entry["id"],
+
+entry["created_at"],
+
+entry["entry_date"],
+
+entry.get("category"),
+
+json.dumps(entry.get("tags", []), ensure_ascii=False),
+
+entry.get("title"),
+
+entry["raw_text"],
+
+json.dumps(entry.get("artifacts", []), ensure_ascii=False),
+
+json.dumps(entry.get("analysis", {}), ensure_ascii=False)
+
+))
+
+conn.commit()
+
+
+
+
+
+def update_entry_analysis(entry_id: str, analysis: Dict[str, Any]) -> None:
+
+with get_conn() as conn:
+
+cur = conn.cursor()
+
+cur.execute("UPDATE entries SET analysis_json = ? WHERE id = ?",
+
+(json.dumps(analysis, ensure_ascii=False), entry_id))
+
+conn.commit()
+
+
+
+
+
+def delete_entry(entry_id: str) -> None:
+
+with get_conn() as conn:
+
+cur = conn.cursor()
+
+cur.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
+
+# notes도 같이 삭제
+
+cur.execute("DELETE FROM skill_notes WHERE entry_id = ?", (entry_id,))
+
+conn.commit()
+
+
+
+
+
+def fetch_entries(limit: int = 500) -> pd.DataFrame:
+
+with get_conn() as conn:
+
+df = pd.read_sql_query(
+
+"SELECT * FROM entries ORDER BY entry_date DESC, created_at DESC LIMIT ?",
+
+conn,
+
+params=(limit,),
+
+)
+
+
+
+def safe_json(x, default):
+
+if not x:
+
+return default
+
+try:
+
+return json.loads(x)
+
+except Exception:
+
+return default
+
+
+
+df["tags_parsed"] = df["tags"].apply(lambda x: safe_json(x, default=[]))
+
+df["artifacts_parsed"] = df["artifacts"].apply(lambda x: safe_json(x, default=[]))
+
+df["analysis_parsed"] = df["analysis_json"].apply(lambda x: safe_json(x, default={}))
+
+return df
+
+
+
+
+
+def fetch_entry_by_id(entry_id: str) -> Optional[Dict[str, Any]]:
+
+with get_conn() as conn:
+
+cur = conn.cursor()
+
+cur.execute("SELECT * FROM entries WHERE id = ?", (entry_id,))
+
+row = cur.fetchone()
+
+
+
+if not row:
+
+return None
+
+
+
+cols = ["id", "created_at", "entry_date", "category", "tags", "title", "raw_text", "artifacts", "analysis_json"]
+
+d = dict(zip(cols, row))
+
+
+
+for k, default in [("tags", []), ("artifacts", []), ("analysis_json", {})]:
+
+try:
+
+d[k] = json.loads(d[k]) if d[k] else default
+
+except Exception:
+
+d[k] = default
+
+return d
+
+
+
+
+
+def upsert_skill_note(
+
+entry_id: str,
+
+entry_date: str,
+
+skill_name: str,
+
+note_type: str,
+
+item_index: int,
+
+item_text: str,
+
+memo_text: str
+
+) -> None:
+
+now = datetime.now().isoformat(timespec="seconds")
+
+with get_conn() as conn:
+
+cur = conn.cursor()
+
+cur.execute("""
+
+INSERT INTO skill_notes (id, entry_id, entry_date, skill_name, note_type, item_index, item_text, memo_text, created_at, updated_at)
+
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+
+ON CONFLICT(entry_id, skill_name, note_type, item_index)
+
+DO UPDATE SET
+
+item_text = excluded.item_text,
+
+memo_text = excluded.memo_text,
+
+updated_at = excluded.updated_at
+
+""", (
+
+str(uuid.uuid4()),
+
+entry_id,
+
+entry_date,
+
+skill_name,
+
+note_type,
+
+int(item_index),
+
+item_text or "",
+
+memo_text or "",
+
+now,
+
+now,
+
+))
+
+conn.commit()
+
+
+
+
+
+def fetch_skill_notes_for_entry(entry_id: str) -> List[Dict[str, Any]]:
+
+with get_conn() as conn:
+
+cur = conn.cursor()
+
+cur.execute("""
+
+SELECT entry_id, entry_date, skill_name, note_type, item_index, item_text, memo_text, updated_at
+
+FROM skill_notes
+
+WHERE entry_id = ?
+
+ORDER BY skill_name, note_type, item_index
+
+""", (entry_id,))
+
+rows = cur.fetchall()
+
+
+
+out = []
+
+for r in rows:
+
+out.append({
+
+"entry_id": r[0],
+
+"entry_date": r[1],
+
+"skill_name": r[2],
+
+"note_type": r[3],
+
+"item_index": r[4],
+
+"item_text": r[5],
+
+"memo_text": r[6],
+
+"updated_at": r[7],
+
+})
+
+return out
+
+
+
+
+
+def fetch_skill_notes_by_skill(skill_name: str, limit: int = 300) -> List[Dict[str, Any]]:
+
+with get_conn() as conn:
+
+cur = conn.cursor()
+
+cur.execute("""
+
+SELECT entry_id, entry_date, skill_name, note_type, item_index, item_text, memo_text, updated_at
+
+FROM skill_notes
+
+WHERE skill_name = ?
+
+ORDER BY entry_date DESC, updated_at DESC
+
+LIMIT ?
+
+""", (skill_name, limit))
+
+rows = cur.fetchall()
+
+
+
+out = []
+
+for r in rows:
+
+out.append({
+
+"entry_id": r[0],
+
+"entry_date": r[1],
+
+"skill_name": r[2],
+
+"note_type": r[3],
+
+"item_index": r[4],
+
+"item_text": r[5],
+
+"memo_text": r[6],
+
+"updated_at": r[7],
+
+})
+
+return out
+
+
+
+
+
+def fetch_skill_notes_by_date(entry_date: str, limit: int = 300) -> List[Dict[str, Any]]:
+
+with get_conn() as conn:
+
+cur = conn.cursor()
+
+cur.execute("""
+
+SELECT entry_id, entry_date, skill_name, note_type, item_index, item_text, memo_text, updated_at
+
+FROM skill_notes
+
+WHERE entry_date = ?
+
+ORDER BY skill_name, note_type, item_index
+
+LIMIT ?
+
+""", (entry_date, limit))
+
+rows = cur.fetchall()
+
+
+
+out = []
+
+for r in rows:
+
+out.append({
+
+"entry_id": r[0],
+
+"entry_date": r[1],
+
+"skill_name": r[2],
+
+"note_type": r[3],
+
+"item_index": r[4],
+
+"item_text": r[5],
+
+"memo_text": r[6],
+
+"updated_at": r[7],
+
+})
+
+return out
+
+
+
+
+
 # ============================
-def _openai_client(api_key: str):
-    from openai import OpenAI
-    return OpenAI(api_key=api_key)
 
-def analyze_experience(behavior, emotion, result, api_key, mood: int, template_name: str, category: str):
-    """
-    메타인지 강화 프롬프트 포함:
-    - counterfactuals 2개(사용자 확정)
-    - blind_spot, next_signal
-    JSON only
-    """
-    client = _openai_client(api_key)
-
-    system = (
-        "당신은 메타인지 기반 커리어 코치이자 분석가다. "
-        "사용자의 경험을 구조화해 소프트스킬을 추정하되, 추측은 '가정'임을 명확히 한다. "
-        "현실적/실행 가능한 대안만 제시한다(마법처럼 상대 마음을 바꾼다 금지). "
-        "반드시 JSON만 반환한다."
-    )
-
-    prompt = f"""
-아래 사용자의 기록을 분석해 주세요.
-
-[카테고리]: {category}
-[템플릿]: {template_name}
-[기분(1~10)]: {mood}
-
-[행동]: {behavior}
-[감정(서술)]: {emotion}
-[결과]: {result}
-
-반드시 아래 스키마 그대로 JSON으로만 응답하세요(키 이름 고정).
-
-{{
-  "soft_skills": [
-    {{
-      "name": "({SOFT_SKILLS} 중 1개)",
-      "reason": "왜 그렇게 판단했는지 1~2문장",
-      "confidence": 0.0
-    }}
-  ],
-  "growth_plan": {{
-    "top_skill": "({SOFT_SKILLS} 중 1개)",
-    "practices": ["실천 제안 1", "실천 제안 2"],
-    "questions": ["성찰 질문 1", "성찰 질문 2"]
-  }},
-  "metacognition": {{
-    "counterfactuals": [
-      {{
-        "alt_action": "당시 갈등/의사결정 상황에서 내가 선택할 수 있었던 현실적인 대안 행동 1(구체적)",
-        "expected_outcome_change": "결과가 어떻게 달라질 가능성이 있는지 2~3문장(불확실성/가정 표시)",
-        "reflection_question": "사용자가 답할 수 있는 맞춤형 성찰 질문 1문장"
-      }},
-      {{
-        "alt_action": "대안 행동 2(다른 접근)",
-        "expected_outcome_change": "2~3문장(불확실성/가정 표시)",
-        "reflection_question": "맞춤형 성찰 질문 1문장"
-      }}
-    ],
-    "blind_spot": "사용자가 놓쳤을 가능성이 있는 관점 1문장",
-    "next_signal": "다음에 비슷한 상황이 오면 스스로 감지할 신호(몸/생각/대화 패턴) 1문장"
-  }}
-}}
-
-규칙:
-- confidence는 0~1 사이 숫자.
-- soft_skills는 1~3개.
-- counterfactuals는 정확히 2개.
-- 문장은 간결하지만 구체적으로.
-""".strip()
-
-    resp = client.chat.completions.create(
-        model=MODEL_ANALYZE,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": prompt},
-        ],
-        response_format={"type": "json_object"},
-    )
-    return json.loads(resp.choices[0].message.content)
-
-def generate_one_liner(api_key: str, recent_entries: list[dict]):
-    """
-    1-1: 오늘의 한 줄 피드백(초저비용)
-    - 최근 3개 요약을 바탕으로 1~2문장
-    """
-    if not api_key or not recent_entries:
-        return ""
-
-    client = _openai_client(api_key)
-    system = (
-        "당신은 짧고 날카로운 메타인지 코치다. "
-        "사용자가 오늘 바로 실행할 수 있는 1~2문장 피드백만 준다. "
-        "과장 금지. 판단 근거는 암시만 하고 길게 설명하지 않는다."
-    )
-    payload = [
-        {
-            "date": e.get("entry_date"),
-            "top_skill": e.get("top_skill"),
-            "mood": e.get("mood"),
-            "behavior": (e.get("behavior") or "")[:240],
-            "result": (e.get("result") or "")[:240],
-        }
-        for e in recent_entries[:3]
-    ]
-    user = (
-        "최근 기록 3개를 보고, 오늘의 한 줄 피드백(1~2문장)을 만들어줘.\n"
-        "- 첫 문장: 패턴 인식(좋은 점 or 위험 신호)\n"
-        "- 둘째 문장: 오늘 실천 1개(아주 구체적으로)\n"
-        f"입력:\n{json.dumps(payload, ensure_ascii=False)}"
-    )
-
-    try:
-        resp = client.chat.completions.create(
-            model=MODEL_ONE_LINER,
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-        )
-        return (resp.choices[0].message.content or "").strip()
-    except Exception:
-        return ""
-
-def generate_identity_statement(api_key: str, entries: pd.DataFrame):
-    """
-    6-1: 정체성 문장 자동 생성(20개 이상)
-    - 1~2문장, 사용자가 수정/고정 가능
-    """
-    if not api_key:
-        return None, "OpenAI API Key가 필요합니다."
-    if entries is None or len(entries) < 20:
-        return None, "정체성 문장은 기록이 20개 이상일 때 생성할 수 있어요."
-
-    client = _openai_client(api_key)
-    system = (
-        "당신은 사용자의 반복 패턴을 바탕으로 정체성 문장을 만드는 코치다. "
-        "자기찬양/허세 없이, 관찰 기반으로 1~2문장만. 한국어."
-    )
-
-    # 비용 절감: 최근 30개만
-    df = entries.sort_values("entry_date", ascending=False).head(30)
-    summary = []
-    for _, r in df.iterrows():
-        summary.append({
-            "date": r.get("entry_date"),
-            "category": r.get("category"),
-            "top_skill": r.get("top_skill"),
-            "mood": r.get("mood"),
-            "behavior": (r.get("behavior") or "")[:200],
-            "result": (r.get("result") or "")[:200],
-        })
-
-    user = (
-        "아래 기록 요약을 바탕으로 사용자의 '정체성 문장'을 1~2문장으로 작성해줘.\n"
-        "- 반드시 행동/선택의 경향을 담아줘.\n"
-        "- 과장 금지.\n"
-        f"입력:\n{json.dumps(summary, ensure_ascii=False)}"
-    )
-
-    try:
-        resp = client.chat.completions.create(
-            model=MODEL_IDENTITY,
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-        )
-        return (resp.choices[0].message.content or "").strip(), None
-    except Exception as e:
-        return None, f"정체성 문장 생성 실패: {e}"
+# Text Similarity (local) + caching
 
 # ============================
-# 4. 분석/시각화 유틸
+
+@st.cache_resource(show_spinner=False)
+
+def build_similarity_index_cached(corpus: Tuple[str, ...]) -> Tuple[TfidfVectorizer, Any]:
+
+vectorizer = TfidfVectorizer(stop_words=None, max_features=5000)
+
+X = vectorizer.fit_transform(list(corpus))
+
+return vectorizer, X
+
+
+
+
+
+def get_similar_entries(df: pd.DataFrame, target_text: str, top_k: int = 5) -> List[Tuple[str, float]]:
+
+if top_k <= 0 or df.empty:
+
+return []
+
+corpus_list = df["raw_text"].fillna("").tolist()
+
+if len(corpus_list) < 2:
+
+return []
+
+
+
+corpus = tuple(corpus_list)
+
+vectorizer, X = build_similarity_index_cached(corpus)
+
+try:
+
+x_target = vectorizer.transform([target_text])
+
+sims = cosine_similarity(x_target, X).flatten()
+
+except Exception:
+
+return []
+
+
+
+pairs = list(zip(df["id"].tolist(), sims.tolist()))
+
+pairs.sort(key=lambda x: x[1], reverse=True)
+
+return pairs[:top_k]
+
+
+
+
+
 # ============================
-def shannon_entropy(proportions):
-    # proportions: list of floats summing to 1
-    ent = 0.0
-    for p in proportions:
-        if p > 0:
-            ent -= p * math.log(p, 2)
-    return ent
 
-def balance_score_from_counts(counts: pd.Series) -> float:
-    # 0~100 스케일: 0(한 스킬 올인) ~ 100(고르게)
-    total = counts.sum()
-    if total <= 0:
-        return 0.0
-    props = (counts / total).tolist()
-    ent = shannon_entropy(props)
-    max_ent = math.log(len(SOFT_SKILLS), 2)
-    if max_ent == 0:
-        return 0.0
-    return float((ent / max_ent) * 100.0)
-
-def mood_bucket(m: int) -> str:
-    # 1~10 → 3구간
-    if m <= 3:
-        return "낮음(1~3)"
-    if m <= 7:
-        return "중간(4~7)"
-    return "높음(8~10)"
-
-def safe_json_load(s):
-    if not s:
-        return {}
-    try:
-        return json.loads(s)
-    except Exception:
-        return {}
+# Robust JSON parsing
 
 # ============================
-# 5. UI 및 메인 로직
+
+def strip_code_fences(s: str) -> str:
+
+s = (s or "").strip()
+
+s = re.sub(r"^\s*```(?:json)?\s*", "", s, flags=re.IGNORECASE)
+
+s = re.sub(r"\s*```\s*$", "", s)
+
+return s.strip()
+
+
+
+
+
+def _extract_first_json_object(s: str) -> str:
+
+s = strip_code_fences(s)
+
+start = s.find("{")
+
+if start == -1:
+
+return s
+
+
+
+depth = 0
+
+for i in range(start, len(s)):
+
+if s[i] == "{":
+
+depth += 1
+
+elif s[i] == "}":
+
+depth -= 1
+
+if depth == 0:
+
+return s[start:i + 1]
+
+return s
+
+
+
+
+
+def _json_repair_minimal(s: str) -> str:
+
+s = s.strip()
+
+s = s.replace("“", '"').replace("”", '"').replace("’", "'").replace("‘", "'")
+
+s = re.sub(r",\s*([}\]])", r"\1", s)
+
+s = re.sub(r"\bTrue\b", "true", s)
+
+s = re.sub(r"\bFalse\b", "false", s)
+
+s = re.sub(r"\bNone\b", "null", s)
+
+return s
+
+
+
+
+
+def robust_json_loads(s: str) -> Dict[str, Any]:
+
+raw = _extract_first_json_object(s)
+
+try:
+
+out = json.loads(raw)
+
+except Exception:
+
+out = json.loads(_json_repair_minimal(raw))
+
+if not isinstance(out, dict):
+
+raise ValueError("JSON 최상위가 객체(dict)가 아닙니다.")
+
+return out
+
+
+
+
+
 # ============================
+
+# Analysis engines
+
+# (요약 없음 / 패턴요약 없음 / STAR 없음)
+
+# 상황분석: 행동, 배움
+
+# 성장플랜: top 스킬 기준 2 practice + 2 question
+
+# ============================
+
+def get_openai_client(api_key: str):
+
+if OpenAI is None:
+
+raise RuntimeError("openai 패키지가 설치되어 있지 않거나 버전이 너무 낮습니다. `pip install -U openai` 해주세요.")
+
+if not api_key or not api_key.strip():
+
+raise RuntimeError("OpenAI API Key가 비어 있습니다.")
+
+return OpenAI(api_key=api_key)
+
+
+
+
+
+def analyze_entry_with_openai(
+
+api_key: str,
+
+model: str,
+
+entry: Dict[str, Any],
+
+related_summaries: List[Dict[str, Any]],
+
+output_mode: str = "analysis_only",
+
+) -> Dict[str, Any]:
+
+client = get_openai_client(api_key)
+
+
+
+persona = (
+
+"당신은 MetaTone의 코치입니다. "
+
+"사용자의 기록에서 '행동'과 '배움'을 뽑고, 그 기록에서 드러난 소프트스킬(1~3개)을 근거 인용과 함께 제시합니다. "
+
+"과장/미사여구/단정 금지. 근거 중심."
+
+)
+
+
+
+related_block = []
+
+for rs in (related_summaries or [])[:5]:
+
+related_block.append({
+
+"id": rs.get("id"),
+
+"date": rs.get("entry_date"),
+
+"one_liner": rs.get("one_liner", ""),
+
+"skills": rs.get("skills", []),
+
+})
+
+
+
+# JSON 계약(요약 없음, 행동/배움만)
+
+output_contract: Dict[str, Any] = {
+
+"meta": {
+
+"entry_id": entry["id"],
+
+"entry_date": entry["entry_date"],
+
+"category": entry.get("category") or ""
+
+},
+
+"situation_analysis": {
+
+"actions": ["내가 실제로 한 행동 2~4개(짧은 문장)"],
+
+"learnings": ["배움 1~2개(짧은 문장)"]
+
+},
+
+"soft_skills": [
+
+{
+
+"name": "협업",
+
+"confidence": 0.0,
+
+"evidence_quotes": ["원문 그대로 1~2개(각 80자 이내)"],
+
+"why_it_counts": "왜 이 역량인지 1문장",
+
+"concept": "개념 1문장"
+
+}
+
+],
+
+"growth_plan": {
+
+"top_skill": "협업",
+
+"practices": ["연습/루틴 1", "연습/루틴 2"],
+
+"questions": ["다음 기록 질문 1", "다음 기록 질문 2"]
+
+}
+
+}
+
+
+
+user_payload = {
+
+"entry": {
+
+"entry_date": entry["entry_date"],
+
+"category": entry.get("category"),
+
+"raw_text": entry["raw_text"],
+
+"artifacts": entry.get("artifacts") or []
+
+},
+
+"related_entries_hint": related_block,
+
+"soft_skill_candidates": SOFT_SKILLS,
+
+"skill_concepts": SKILL_CONCEPTS,
+
+"output_contract_example": output_contract,
+
+"constraints": {
+
+"practice_n": PRACTICE_N,
+
+"question_n": QUESTION_N
+
+}
+
+}
+
+
+
+instructions = (
+
+"규칙:\n"
+
+"1) 반드시 JSON만 출력(마크다운/코드펜스/설명문 금지)\n"
+
+"2) soft_skills는 1~3개, confidence는 0~1 숫자\n"
+
+"3) evidence_quotes는 원문 그대로 최대 2개, 각 80자 이내\n"
+
+"4) situation_analysis는 actions/learnings만 (요약 금지)\n"
+
+f"5) growth_plan의 practices는 정확히 {PRACTICE_N}개, questions는 정확히 {QUESTION_N}개\n"
+
+"6) growth_plan.top_skill은 soft_skills 중 confidence가 가장 높은 스킬명\n"
+
+"7) concept는 skill_concepts를 참고해 1문장으로 간단히\n"
+
+"8) 과장/미사여구/단정 금지\n"
+
+)
+
+
+
+try:
+
+resp = client.chat.completions.create(
+
+model=model,
+
+temperature=0.4,
+
+messages=[
+
+{"role": "system", "content": persona},
+
+{"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+
+{"role": "user", "content": instructions},
+
+]
+
+)
+
+except Exception as e:
+
+raise RuntimeError(
+
+f"OpenAI 호출 실패: {e}\n\n"
+
+f"점검:\n- API Key 유효 여부\n- 모델({model}) 접근 권한/이름\n- 사용량/쿼터/결제 상태"
+
+)
+
+
+
+out = robust_json_loads(resp.choices[0].message.content or "")
+
+return out
+
+
+
+
+
+def analyze_entry_local(
+
+entry: Dict[str, Any],
+
+related_summaries: List[Dict[str, Any]],
+
+output_mode: str = "analysis_only",
+
+) -> Dict[str, Any]:
+
+text = (entry.get("raw_text") or "").strip()
+
+
+
+# 행동/배움: 문장/줄에서 간단 추출(보수적)
+
+lines = [l.strip() for l in re.split(r"[\n\r]+", text) if l.strip()]
+
+sentences = [s.strip() for s in re.split(r"[.!?\n]", text) if s.strip()]
+
+
+
+# 행동 후보: 동사/표현 기반
+
+action_markers = ["했다", "함", "진행", "정리", "공유", "설명", "조율", "확인", "개선", "시도", "결정", "분석", "제안", "요청"]
+
+actions: List[str] = []
+
+for l in lines:
+
+if any(m in l for m in action_markers):
+
+actions.append(l[:140])
+
+if len(actions) >= 4:
+
+break
+
+if not actions:
+
+# fallback: 앞 문장 일부
+
+actions = [sentences[0][:140]] if sentences else ["(행동) 내가 실제로 한 일을 2~3문장으로 적어보세요."]
+
+
+
+learning_markers = ["배웠", "깨달", "다음", "개선", "반성", "느꼈", "알게", "교훈", "성찰"]
+
+learnings: List[str] = []
+
+for l in reversed(lines):
+
+if any(m in l for m in learning_markers):
+
+learnings.append(l[:140])
+
+if len(learnings) >= 2:
+
+break
+
+learnings = list(reversed(learnings))
+
+if not learnings:
+
+learnings = ["(배움) 오늘 얻은 교훈/다음 기준을 1문장으로 남겨보세요."]
+
+
+
+# 스킬 룰
+
+skill_rules = {
+
+"문제해결": ["문제", "원인", "해결", "분석", "디버깅", "구조", "대안", "개선"],
+
+"의사소통": ["설명", "공유", "발표", "설득", "정리", "문서", "피드백", "합의"],
+
+"협업": ["팀", "협업", "조율", "역할", "회의", "갈등", "동료", "함께"],
+
+"리더십": ["주도", "리드", "결정", "방향", "가이드", "코칭", "책임", "기획"],
+
+"자기관리/회복탄력성": ["시간", "루틴", "회복", "스트레스", "압박", "우선순위", "지속", "컨디션"],
+
+"학습역량": ["공부", "학습", "정리", "복습", "실험", "개념", "강의", "독서", "연습"],
+
+}
+
+
+
+scores = {k: 0 for k in SOFT_SKILLS}
+
+for sk, kws in skill_rules.items():
+
+for kw in kws:
+
+if kw in text:
+
+scores[sk] += 1
+
+
+
+ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+
+picked = [(k, v) for k, v in ranked if v > 0][:3]
+
+if not picked:
+
+picked = [("학습역량", 1)]
+
+
+
+evidence = {k: [] for k in SOFT_SKILLS}
+
+for sk, _v in picked:
+
+kws = skill_rules.get(sk, [])
+
+for s in sentences:
+
+if any(kw in s for kw in kws):
+
+evidence[sk].append(s[:80])
+
+if len(evidence[sk]) >= 2:
+
+break
+
+
+
+max_score = max(v for _, v in picked) if picked else 1
+
+soft_skills = []
+
+for sk, v in picked:
+
+conf = 0.4 + 0.6 * (v / max_score) if max_score > 0 else 0.5
+
+soft_skills.append({
+
+"name": sk,
+
+"confidence": round(min(max(conf, 0.0), 1.0), 2),
+
+"evidence_quotes": evidence[sk][:2] if evidence[sk] else (sentences[:1] if sentences else []),
+
+"why_it_counts": "원문에서 해당 행동 단서(키워드/표현)가 보여 이 역량이 드러난 것으로 추정했습니다. (무료 로컬 분석)",
+
+"concept": SKILL_CONCEPTS.get(sk, "")
+
+})
+
+
+
+# top_skill = confidence max
+
+top_skill = soft_skills[0]["name"]
+
+# growth_plan: top skill 기준 2+2
+
+practices = [
+
+"다음 기록에서 '내가 선택한 기준(우선순위/근거)'을 1문장으로 남기기",
+
+"결과를 관찰 가능한 표현(전/후 변화, 시간/횟수/품질)로 적기",
+
+][:PRACTICE_N]
+
+questions = [
+
+"내가 한 선택의 기준은 무엇이었나?",
+
+"다음에 같은 상황이면 무엇을 유지/변경할까?",
+
+][:QUESTION_N]
+
+
+
+out: Dict[str, Any] = {
+
+"meta": {
+
+"entry_id": entry["id"],
+
+"entry_date": entry["entry_date"],
+
+"category": entry.get("category") or ""
+
+},
+
+"situation_analysis": {
+
+"actions": actions[:4],
+
+"learnings": learnings[:2],
+
+},
+
+"soft_skills": soft_skills,
+
+"growth_plan": {
+
+"top_skill": top_skill,
+
+"practices": practices,
+
+"questions": questions
+
+}
+
+}
+
+return out
+
+
+
+
+
+def run_analysis_engine(
+
+engine: str,
+
+entry: Dict[str, Any],
+
+related: List[Dict[str, Any]],
+
+) -> Dict[str, Any]:
+
+if engine.startswith("무료"):
+
+return analyze_entry_local(entry=entry, related_summaries=related)
+
+
+
+api_key = st.session_state.get("api_key", "")
+
+if not api_key:
+
+st.warning("LLM 분석을 선택했지만 API Key가 없어 무료(로컬) 분석으로 대체합니다.")
+
+return analyze_entry_local(entry=entry, related_summaries=related)
+
+
+
+try:
+
+return analyze_entry_with_openai(
+
+api_key=api_key,
+
+model=st.session_state.get("model", DEFAULT_MODEL),
+
+entry=entry,
+
+related_summaries=related
+
+)
+
+except Exception as e:
+
+st.warning(f"LLM 분석 실패 → 무료(로컬) 분석으로 대체합니다.\n\n사유: {e}")
+
+return analyze_entry_local(entry=entry, related_summaries=related)
+
+
+
+
+
+# ============================
+
+# Aggregations / Related summaries
+
+# ============================
+
+def compute_skill_totals(df: pd.DataFrame) -> Dict[str, int]:
+
+totals = {s: 0 for s in SOFT_SKILLS}
+
+if df.empty:
+
+return totals
+
+for an in df["analysis_parsed"].tolist():
+
+if not isinstance(an, dict):
+
+continue
+
+skills = an.get("soft_skills") or []
+
+if not isinstance(skills, list):
+
+continue
+
+for sk in skills:
+
+if isinstance(sk, dict):
+
+name = sk.get("name")
+
+if name in totals:
+
+totals[name] += 1
+
+return totals
+
+
+
+
+
+def summarize_for_related(df: pd.DataFrame) -> List[Dict[str, Any]]:
+
+summaries: List[Dict[str, Any]] = []
+
+for _, r in df.iterrows():
+
+an = r.get("analysis_parsed") or {}
+
+one_liner = ""
+
+skills: List[str] = []
+
+try:
+
+sa = (an.get("situation_analysis", {}) or {}) if isinstance(an, dict) else {}
+
+learnings = sa.get("learnings") or []
+
+if isinstance(learnings, list) and learnings:
+
+one_liner = (learnings[0] or "")[:80]
+
+soft = (an.get("soft_skills") or []) if isinstance(an, dict) else []
+
+skills = [x.get("name") for x in soft if isinstance(x, dict) and x.get("name")]
+
+except Exception:
+
+pass
+
+summaries.append({
+
+"id": r["id"],
+
+"entry_date": r["entry_date"],
+
+"one_liner": one_liner,
+
+"skills": skills
+
+})
+
+return summaries
+
+
+
+
+
+# ============================
+
+# Notes initialization + UI helpers
+
+# ============================
+
+def ensure_notes_initialized(
+
+entry_id: str,
+
+entry_date: str,
+
+skill_name: str,
+
+practices: List[str],
+
+questions: List[str],
+
+) -> None:
+
+"""
+
+notes 테이블에 기본 row가 없으면 만들어둔다.
+
+(이미 있으면 upsert로 덮어쓰지 않음: 사용자가 수정한 텍스트/메모를 보호)
+
+"""
+
+existing = fetch_skill_notes_for_entry(entry_id)
+
+exists_keys = set()
+
+for n in existing:
+
+exists_keys.add((n["skill_name"], n["note_type"], int(n["item_index"])))
+
+
+
+now = datetime.now().isoformat(timespec="seconds")
+
+with get_conn() as conn:
+
+cur = conn.cursor()
+
+# practices
+
+for i in range(PRACTICE_N):
+
+key = (skill_name, "practice", i)
+
+if key in exists_keys:
+
+continue
+
+item_text = practices[i] if i < len(practices) else ""
+
+cur.execute("""
+
+INSERT OR IGNORE INTO skill_notes
+
+(id, entry_id, entry_date, skill_name, note_type, item_index, item_text, memo_text, created_at, updated_at)
+
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+
+""", (
+
+str(uuid.uuid4()), entry_id, entry_date, skill_name, "practice", i,
+
+item_text, "", now, now
+
+))
+
+
+
+# questions
+
+for i in range(QUESTION_N):
+
+key = (skill_name, "question", i)
+
+if key in exists_keys:
+
+continue
+
+item_text = questions[i] if i < len(questions) else ""
+
+cur.execute("""
+
+INSERT OR IGNORE INTO skill_notes
+
+(id, entry_id, entry_date, skill_name, note_type, item_index, item_text, memo_text, created_at, updated_at)
+
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+
+""", (
+
+str(uuid.uuid4()), entry_id, entry_date, skill_name, "question", i,
+
+item_text, "", now, now
+
+))
+
+conn.commit()
+
+
+
+
+
+def group_notes(notes: List[Dict[str, Any]]) -> Dict[Tuple[str, str], Dict[int, Dict[str, str]]]:
+
+"""
+
+return: {(skill_name, note_type): {idx: {"item_text":..., "memo_text":...}}}
+
+"""
+
+out: Dict[Tuple[str, str], Dict[int, Dict[str, str]]] = {}
+
+for n in notes:
+
+k = (n["skill_name"], n["note_type"])
+
+out.setdefault(k, {})
+
+out[k][int(n["item_index"])] = {
+
+"item_text": n.get("item_text") or "",
+
+"memo_text": n.get("memo_text") or ""
+
+}
+
+return out
+
+
+
+
+
+def render_skill_totals(totals: Dict[str, int]) -> None:
+
+st.subheader("📈 소프트스킬 누적(범주별)")
+
+cols = st.columns(3)
+
+items = list(totals.items())
+
+for i, (k, v) in enumerate(items):
+
+with cols[i % 3]:
+
+st.metric(label=k, value=v)
+
+
+
+df_tot = (
+
+pd.DataFrame([{"soft_skill": k, "count": v} for k, v in totals.items()])
+
+.sort_values("count", ascending=False)
+
+)
+
+st.dataframe(df_tot, use_container_width=True, hide_index=True)
+
+
+
+
+
+def render_analysis_block(analysis: Dict[str, Any]) -> None:
+
+if not analysis or not isinstance(analysis, dict):
+
+st.info("아직 분석 결과가 없습니다.")
+
+return
+
+
+
+st.subheader("🧠 상황분석")
+
+sa = analysis.get("situation_analysis", {}) or {}
+
+actions = sa.get("actions") or []
+
+learnings = sa.get("learnings") or []
+
+
+
+st.markdown("**행동**")
+
+if isinstance(actions, list) and actions:
+
+for a in actions:
+
+st.write(f"- {a}")
+
+else:
+
+st.write("—")
+
+
+
+st.markdown("**배움**")
+
+if isinstance(learnings, list) and learnings:
+
+for l in learnings:
+
+st.write(f"- {l}")
+
+else:
+
+st.write("—")
+
+
+
+st.subheader("🎯 오늘 쌓은 소프트 스킬")
+
+skills = analysis.get("soft_skills", []) or []
+
+if not isinstance(skills, list) or not skills:
+
+st.write("선정된 역량이 없습니다.")
+
+return
+
+
+
+for sk in skills:
+
+if not isinstance(sk, dict):
+
+continue
+
+name = sk.get("name", "")
+
+conf = sk.get("confidence", 0)
+
+try:
+
+conf = float(conf)
+
+except Exception:
+
+conf = 0.0
+
+
+
+with st.expander(f"{name} (confidence: {conf:.2f})", expanded=False):
+
+ev = sk.get("evidence_quotes", []) or []
+
+if isinstance(ev, list) and ev:
+
+st.markdown("**근거(원문 인용)**")
+
+for q in ev[:2]:
+
+st.caption(f"“{q}”")
+
+
+
+st.markdown("**왜 이 스킬인가**")
+
+st.write(sk.get("why_it_counts", ""))
+
+
+
+st.markdown("**개념 설명**")
+
+st.info(sk.get("concept") or SKILL_CONCEPTS.get(name, ""))
+
+
+
+
+
+def get_top_skill_from_analysis(analysis: Dict[str, Any]) -> Optional[str]:
+
+if not isinstance(analysis, dict):
+
+return None
+
+gp = analysis.get("growth_plan", {}) or {}
+
+top = gp.get("top_skill")
+
+if top in SOFT_SKILLS:
+
+return top
+
+
+
+# fallback: soft_skills[0]
+
+skills = analysis.get("soft_skills") or []
+
+if isinstance(skills, list) and skills and isinstance(skills[0], dict):
+
+name = skills[0].get("name")
+
+if name in SOFT_SKILLS:
+
+return name
+
+return None
+
+
+
+
+
+def get_growth_items_for_top_skill(analysis: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+
+gp = (analysis.get("growth_plan", {}) or {}) if isinstance(analysis, dict) else {}
+
+practices = gp.get("practices") or []
+
+questions = gp.get("questions") or []
+
+if not isinstance(practices, list):
+
+practices = []
+
+if not isinstance(questions, list):
+
+questions = []
+
+# 정확히 2개로 맞추기(부족하면 빈 값)
+
+practices = (practices + [""] * PRACTICE_N)[:PRACTICE_N]
+
+questions = (questions + [""] * QUESTION_N)[:QUESTION_N]
+
+return practices, questions
+
+
+
+
+
+def render_memo_editor_for_skill(
+
+entry_id: str,
+
+entry_date: str,
+
+skill_name: str,
+
+default_practices: List[str],
+
+default_questions: List[str],
+
+) -> None:
+
+"""
+
+- item_text 수정 가능
+
+- memo_text 입력 가능
+
+- 저장 버튼으로 upsert
+
+"""
+
+ensure_notes_initialized(entry_id, entry_date, skill_name, default_practices, default_questions)
+
+notes = fetch_skill_notes_for_entry(entry_id)
+
+grouped = group_notes(notes)
+
+
+
+st.markdown(f"### ✍️ 메모 — {skill_name}")
+
+st.caption("연습/질문 문구도 수정할 수 있어요. 저장을 눌러 반영하세요.")
+
+
+
+# practices
+
+st.markdown("**연습/루틴 (2)**")
+
+for i in range(PRACTICE_N):
+
+cur = grouped.get((skill_name, "practice"), {}).get(i, {"item_text": "", "memo_text": ""})
+
+item_key = f"item_{entry_id}_{skill_name}_practice_{i}"
+
+memo_key = f"memo_{entry_id}_{skill_name}_practice_{i}"
+
+
+
+st.text_input(f"연습 {i+1}", value=cur["item_text"], key=item_key)
+
+st.text_area("메모", value=cur["memo_text"], key=memo_key, height=80)
+
+
+
+# questions
+
+st.markdown("**다음 기록 질문 (2)**")
+
+for i in range(QUESTION_N):
+
+cur = grouped.get((skill_name, "question"), {}).get(i, {"item_text": "", "memo_text": ""})
+
+item_key = f"item_{entry_id}_{skill_name}_question_{i}"
+
+memo_key = f"memo_{entry_id}_{skill_name}_question_{i}"
+
+
+
+st.text_input(f"질문 {i+1}", value=cur["item_text"], key=item_key)
+
+st.text_area("메모", value=cur["memo_text"], key=memo_key, height=80)
+
+
+
+if st.button("💾 메모 저장", key=f"save_{entry_id}_{skill_name}"):
+
+# practices save
+
+for i in range(PRACTICE_N):
+
+item_key = f"item_{entry_id}_{skill_name}_practice_{i}"
+
+memo_key = f"memo_{entry_id}_{skill_name}_practice_{i}"
+
+upsert_skill_note(
+
+entry_id=entry_id,
+
+entry_date=entry_date,
+
+skill_name=skill_name,
+
+note_type="practice",
+
+item_index=i,
+
+item_text=st.session_state.get(item_key, ""),
+
+memo_text=st.session_state.get(memo_key, ""),
+
+)
+
+# questions save
+
+for i in range(QUESTION_N):
+
+item_key = f"item_{entry_id}_{skill_name}_question_{i}"
+
+memo_key = f"memo_{entry_id}_{skill_name}_question_{i}"
+
+upsert_skill_note(
+
+entry_id=entry_id,
+
+entry_date=entry_date,
+
+skill_name=skill_name,
+
+note_type="question",
+
+item_index=i,
+
+item_text=st.session_state.get(item_key, ""),
+
+memo_text=st.session_state.get(memo_key, ""),
+
+)
+
+st.success("저장했습니다.")
+
+
+
+
+
+# ============================
+
+# Streamlit Pages
+
+# ============================
+
 def main():
-    st.set_page_config(page_title="MetaTone Pro", layout="wide")
-    init_db()
 
-    if "db_ver" not in st.session_state:
-        st.session_state["db_ver"] = 0
-    if "one_liner_cache" not in st.session_state:
-        st.session_state["one_liner_cache"] = {"date": "", "text": ""}
+st.set_page_config(page_title="MetaTone", layout="wide")
 
-    st.sidebar.title("💎 MetaTone Pro")
-    menu = st.sidebar.radio("메뉴", ["성장 대시보드", "새 기록 작성", "회고 보관소"])
-    api_key = st.sidebar.text_input("OpenAI API Key", type="password")
+init_db()
 
-    # 공통 데이터
-    df_entries = fetch_entries(st.session_state["db_ver"])
-    df_notes = fetch_growth_notes(st.session_state["db_ver"])
 
-    # ================
-    # 페이지 1: 새 기록 작성
-    # ================
-    if menu == "새 기록 작성":
-        st.header("✍️ 구조화된 오늘의 경험 기록")
-        st.caption("템플릿을 고르면 질문이 달라져요. (MetaTone: 메타인지 향상에 최적화)")
 
-        with st.form("entry_form"):
-            col1, col2, col3 = st.columns([1, 1, 1])
-            with col1:
-                entry_date = st.date_input("날짜", date.today())
-            with col2:
-                category = st.selectbox("카테고리", CATEGORIES)
-            with col3:
-                template_name = st.selectbox("템플릿", list(TEMPLATES.keys()), index=0)
+# Sidebar settings
 
-            # mood 숫자(시각화/패턴 분석용)
-            mood = st.slider("기분(1~10)", 1, 10, 6)
+st.sidebar.title("⚙️ Settings")
 
-            t = TEMPLATES[template_name]
-            st.subheader(t["behavior_label"])
-            behavior = st.text_area(" ", key="behavior", placeholder=t["behavior_ph"], height=120)
+api_key_env = os.getenv("OPENAI_API_KEY", "")
 
-            st.subheader(t["emotion_label"])
-            emotion = st.text_area("  ", key="emotion", placeholder=t["emotion_ph"], height=100)
+api_key_input = st.sidebar.text_input(
 
-            st.subheader(t["result_label"])
-            result = st.text_area("   ", key="result", placeholder=t["result_ph"], height=110)
+"OpenAI API Key (선택)",
 
-            submit = st.form_submit_button("역량 분석 및 저장", type="primary")
+value=st.session_state.get("api_key", api_key_env),
 
-        if submit:
-            if not api_key:
-                st.error("OpenAI API Key를 입력해주세요.")
-                return
-            if not behavior.strip() or not result.strip():
-                st.error("행동과 결과는 최소한 작성해 주세요. (감정은 짧아도 OK)")
-                return
+type="password"
 
-            with st.spinner("전문 코치가 분석 중입니다..."):
-                try:
-                    analysis = analyze_experience(
-                        behavior=behavior,
-                        emotion=emotion,
-                        result=result,
-                        api_key=api_key,
-                        mood=int(mood),
-                        template_name=template_name,
-                        category=category,
-                    )
-                except Exception as e:
-                    st.error(f"분석 실패: {e}")
-                    return
+)
 
-            entry_id = str(uuid.uuid4())
-            top_skill = (analysis.get("growth_plan", {}) or {}).get("top_skill", "")
+st.session_state["api_key"] = (api_key_input or "").strip()
 
-            with get_conn() as conn:
-                cur = conn.cursor()
-                cur.execute(
-                    "INSERT INTO entries (id, entry_date, category, template_name, mood, behavior, emotion, result, analysis_json, top_skill) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    (
-                        entry_id,
-                        entry_date.isoformat(),
-                        category,
-                        template_name,
-                        int(mood),
-                        behavior,
-                        emotion,
-                        result,
-                        json.dumps(analysis, ensure_ascii=False),
-                        top_skill,
-                    ),
-                )
 
-                # 2+2 성장 메모 저장
-                gp = analysis.get("growth_plan", {}) or {}
-                for p in (gp.get("practices") or [])[:2]:
-                    cur.execute(
-                        "INSERT INTO growth_notes (id, entry_id, note_type, content) VALUES (?,?,?,?)",
-                        (str(uuid.uuid4()), entry_id, "practice", p),
-                    )
-                for q in (gp.get("questions") or [])[:2]:
-                    cur.execute(
-                        "INSERT INTO growth_notes (id, entry_id, note_type, content) VALUES (?,?,?,?)",
-                        (str(uuid.uuid4()), entry_id, "question", q),
-                    )
 
-                conn.commit()
+current_model = st.session_state.get("model", DEFAULT_MODEL)
 
-            bump_db_version()
-            st.success(f"분석 완료! 오늘의 핵심 역량은 **[{top_skill}]** 입니다.")
-            st.rerun()
+if current_model not in MODEL_OPTIONS:
 
-    # ================
-    # 페이지 2: 성장 대시보드
-    # ================
-    elif menu == "성장 대시보드":
-        st.header("📊 역량 성장 리포트 (주간 단위)")
-        if df_entries.empty:
-            st.info("아직 기록이 없어요. '새 기록 작성'에서 첫 기록을 남겨보세요!")
-            return
+current_model = DEFAULT_MODEL
 
-        # --- 1-1 오늘의 한 줄 피드백 (대시보드 상단 고정) ---
-        st.subheader("🧭 오늘의 한 줄 피드백")
-        recent3 = df_entries.head(3).to_dict(orient="records")
-        today_key = date.today().isoformat()
-        cached = st.session_state["one_liner_cache"]
+st.sidebar.selectbox(
 
-        colA, colB = st.columns([4, 1])
-        with colB:
-            regen = st.button("재생성", use_container_width=True)
-        if regen or cached["date"] != today_key or not cached["text"]:
-            if api_key:
-                text = generate_one_liner(api_key, recent3)
-                st.session_state["one_liner_cache"] = {"date": today_key, "text": text}
-            else:
-                st.session_state["one_liner_cache"] = {"date": today_key, "text": ""}
+"Model (LLM 모드에서만 사용)",
 
-        one_liner = st.session_state["one_liner_cache"]["text"]
-        if one_liner:
-            st.success(one_liner)
-        else:
-            st.info("OpenAI API Key를 입력하면 한 줄 피드백이 생성돼요.")
+options=MODEL_OPTIONS,
 
-        st.divider()
+index=MODEL_OPTIONS.index(current_model),
 
-        # --- 2-2 스킬 편향 경고 (최근 10개 기준) ---
-        st.subheader("⚖️ 역량 편향 & 균형도")
-        last_n = 10
-        df_last = df_entries.head(last_n)
-        counts_last = df_last["top_skill"].value_counts()
-        if not counts_last.empty:
-            top = counts_last.index[0]
-            share = counts_last.iloc[0] / max(1, counts_last.sum())
-            balance = balance_score_from_counts(counts_last.reindex(SOFT_SKILLS).fillna(0))
+key="model"
 
-            m1, m2, m3 = st.columns(3)
-            with m1:
-                st.metric("최근 10개 최빈 역량", top)
-            with m2:
-                st.metric("편향 비중", f"{share*100:.0f}%")
-            with m3:
-                st.metric("균형도(0~100)", f"{balance:.0f}")
+)
 
-            if share >= 0.60:
-                st.warning(
-                    f"최근 {last_n}개 기록의 **{share*100:.0f}%**가 **{top}**에 몰려 있어요.\n\n"
-                    "MetaTone 관점: 편향이 나쁘진 않지만, **다른 프레임도 함께 강화**하면 성장 폭이 커져요."
-                )
 
-        # --- 전체 분포 (현재 상태) ---
-        dist_counts = df_entries["top_skill"].value_counts().reindex(SOFT_SKILLS).fillna(0).astype(int).reset_index()
-        dist_counts.columns = ["top_skill", "count"]
-        fig_dist = px.bar(dist_counts, x="top_skill", y="count", title="전체 기록 기준 핵심 역량 분포")
-        st.plotly_chart(fig_dist, use_container_width=True)
 
-        st.divider()
+st.sidebar.markdown("---")
 
-        # --- 시간에 따른 성장(주간) ---
-        st.subheader("📆 주간 변화(성장 추세)")
+st.sidebar.subheader("🧠 분석 엔진")
 
-        df_t = df_entries.copy()
-        df_t["entry_date"] = pd.to_datetime(df_t["entry_date"])
-        df_t["week"] = df_t["entry_date"].dt.date.apply(iso_week_key)
+st.sidebar.selectbox("분석 방식", options=ANALYSIS_ENGINES, index=0, key="engine")
 
-        # 주차별 스킬 비중(100% stacked area)
-        pivot = (
-            df_t.pivot_table(index="week", columns="top_skill", values="id", aggfunc="count", fill_value=0)
-            .reindex(columns=SOFT_SKILLS, fill_value=0)
-            .sort_index()
-        )
-        pivot_pct = pivot.div(pivot.sum(axis=1).replace(0, 1), axis=0) * 100
-        pivot_pct = pivot_pct.reset_index().melt(id_vars="week", var_name="top_skill", value_name="pct")
 
-        fig_area = px.area(
-            pivot_pct,
-            x="week",
-            y="pct",
-            color="top_skill",
-            title="주차별 핵심 역량 비중(%)",
-        )
-        fig_area.update_layout(yaxis_title="비중(%)", xaxis_title="주(ISO Week)")
-        st.plotly_chart(fig_area, use_container_width=True)
 
-        # 주차별 균형도 추세
-        bal_rows = []
-        for wk, g in df_t.groupby("week"):
-            c = g["top_skill"].value_counts().reindex(SOFT_SKILLS).fillna(0)
-            bal_rows.append({"week": wk, "balance": balance_score_from_counts(c)})
-        df_bal = pd.DataFrame(bal_rows).sort_values("week")
-        fig_bal = px.line(df_bal, x="week", y="balance", markers=True, title="주차별 균형도(0~100) 추세")
-        fig_bal.update_layout(yaxis_title="균형도", xaxis_title="주(ISO Week)")
-        st.plotly_chart(fig_bal, use_container_width=True)
+st.sidebar.markdown("---")
 
-        # (보너스) Mood x Skill 히트맵: 메타인지 트리거
-        st.subheader("🧠 기분-역량 패턴(메타인지 트리거)")
-        df_m = df_entries.copy()
-        df_m["mood"] = pd.to_numeric(df_m["mood"], errors="coerce").fillna(0).astype(int)
-        df_m["mood_bucket"] = df_m["mood"].apply(lambda x: mood_bucket(x) if x > 0 else "미입력")
-        heat = (
-            df_m.pivot_table(index="top_skill", columns="mood_bucket", values="id", aggfunc="count", fill_value=0)
-            .reindex(index=SOFT_SKILLS, fill_value=0)
-            .reset_index()
-            .melt(id_vars="top_skill", var_name="mood_bucket", value_name="count")
-        )
-        fig_heat = px.density_heatmap(
-            heat,
-            x="mood_bucket",
-            y="top_skill",
-            z="count",
-            histfunc="sum",
-            title="기분 구간별 기록된 핵심 역량 빈도",
-        )
-        st.plotly_chart(fig_heat, use_container_width=True)
+page = st.sidebar.radio("페이지", ["✍️ 오늘의 기록 추가", "📚 기록 목록", "📒 메모", "🧪 디버그/로그"])
 
-        st.divider()
 
-        # --- 3-1 이번 주 목표(최대 3개) ---
-        st.subheader("🎯 이번 주 집중 루틴 (최대 3개)")
-        current_week = iso_week_key(date.today())
 
-        # 이번 주 목표 목록
-        weekly = df_notes[
-            (df_notes["note_type"] == "practice")
-            & (df_notes["is_weekly_goal"] == 1)
-            & (df_notes["goal_week"] == current_week)
-        ].copy()
+df = fetch_entries()
 
-        # 후보: 최근 practice 중에서 아직 weekly_goal 아닌 것 (최근 30개)
-        recent_entry_ids = set(df_entries.head(30)["id"].tolist())
-        candidates = df_notes[
-            (df_notes["note_type"] == "practice")
-            & (df_notes["entry_id"].isin(recent_entry_ids))
-        ].copy()
-        candidates["label"] = candidates["content"].fillna("")
-        # 중복 제거(같은 문장 많을 수 있음)
-        candidates = candidates.drop_duplicates(subset=["label"]).head(30)
+totals = compute_skill_totals(df)
 
-        left, right = st.columns([2, 1])
-        with left:
-            if weekly.empty:
-                st.info("이번 주 목표가 아직 없어요. 아래에서 최대 3개를 골라 고정해보세요.")
-            else:
-                st.write(f"**이번 주({current_week}) 목표**")
-                for _, r in weekly.iterrows():
-                    done = bool(int(r.get("is_completed") or 0))
-                    new_done = st.checkbox(r["content"], value=done, key=f"wk_done_{r['id']}")
-                    if new_done != done:
-                        with get_conn() as conn:
-                            conn.execute("UPDATE growth_notes SET is_completed=? WHERE id=?", (1 if new_done else 0, r["id"]))
-                        bump_db_version()
-                        st.rerun()
 
-            # 선택 UI
-            selected = st.multiselect(
-                "이번 주 목표로 승격할 실천 제안 선택(최대 3개)",
-                options=candidates["label"].tolist(),
-                default=[],
-            )
 
-            if len(selected) > 3:
-                st.error("최대 3개까지만 선택할 수 있어요.")
-            else:
-                if st.button("이번 주 목표로 저장", type="primary"):
-                    # 현재 주 목표 3개 제한 강제
-                    with get_conn() as conn:
-                        existing = conn.execute(
-                            "SELECT COUNT(*) FROM growth_notes WHERE is_weekly_goal=1 AND goal_week=?",
-                            (current_week,),
-                        ).fetchone()[0]
-                        if existing + len(selected) > 3:
-                            st.error("이미 저장된 목표가 있어요. 합쳐서 최대 3개까지만 가능합니다.")
-                        else:
-                            # candidates에서 content로 id 찾아 업데이트
-                            for content in selected:
-                                # content 매칭되는 행(아무거나 1개)
-                                row = conn.execute(
-                                    "SELECT id FROM growth_notes WHERE note_type='practice' AND content=? LIMIT 1",
-                                    (content,),
-                                ).fetchone()
-                                if row:
-                                    conn.execute(
-                                        "UPDATE growth_notes SET is_weekly_goal=1, goal_week=? WHERE id=?",
-                                        (current_week, row[0]),
-                                    )
-                            conn.commit()
-                    bump_db_version()
-                    st.success("이번 주 목표로 저장했어요.")
-                    st.rerun()
+st.title(APP_TITLE)
 
-        with right:
-            # 간단한 진행률
-            if not weekly.empty:
-                total = len(weekly)
-                done = int((weekly["is_completed"].fillna(0).astype(int) == 1).sum())
-                pct = int(round(done / max(1, total) * 100))
-                st.metric("이번 주 진행률", f"{pct}%", f"{done}/{total} 완료")
-            else:
-                st.metric("이번 주 진행률", "0%", "0/0")
+st.caption("기록 본문에서 행동/배움을 뽑고, 오늘 드러난 소프트스킬과 (top 스킬 기준) 2+2 루틴/질문 메모를 누적합니다.")
 
-        st.divider()
 
-        # --- 6-1 정체성 문장 ---
-        st.subheader("🪞 나의 정체성 문장 (MetaTone)")
-        ident = get_identity()
-        can_generate = len(df_entries) >= 20
 
-        col1, col2 = st.columns([3, 1])
-        with col2:
-            gen_btn = st.button("정체성 문장 생성/갱신", disabled=(not can_generate or not api_key), use_container_width=True)
+render_skill_totals(totals)
 
-        if gen_btn:
-            with st.spinner("패턴을 요약해 정체성 문장을 생성 중..."):
-                text, err = generate_identity_statement(api_key, df_entries)
-            if err:
-                st.error(err)
-            else:
-                # 핀 유지
-                set_identity(text, ident["is_pinned"])
-                st.success("정체성 문장을 업데이트했어요.")
-                st.rerun()
+st.markdown("---")
 
-        pinned = st.checkbox("고정(핀)", value=bool(ident["is_pinned"]))
-        content = st.text_area(
-            "정체성 문장(직접 수정 가능)",
-            value=ident["content"] or ("기록이 20개 이상이면 생성할 수 있어요." if not can_generate else ""),
-            height=80,
-        )
-        save = st.button("저장")
-        if save:
-            set_identity(content, int(pinned))
-            st.success("저장했어요.")
-            st.rerun()
 
-        if ident["updated_at"]:
-            st.caption(f"최근 업데이트: {ident['updated_at']}")
 
-    # ================
-    # 페이지 3: 회고 보관소 (2+2 메모 관리 + 메타인지 질문 표시)
-    # ================
-    elif menu == "회고 보관소":
-        st.header("📚 누적 기록 및 성장 관리")
-        if df_entries.empty:
-            st.info("아직 기록이 없어요. '새 기록 작성'에서 기록을 남겨보세요!")
-            return
+if page == "✍️ 오늘의 기록 추가":
 
-        # notes를 entry_id로 빠르게 접근하기 위해 dict 구성
-        notes_by_entry = {}
-        if not df_notes.empty:
-            for _, n in df_notes.iterrows():
-                notes_by_entry.setdefault(n["entry_id"], []).append(n)
+render_new_entry(df)
 
-        current_week = iso_week_key(date.today())
+elif page == "📚 기록 목록":
 
-        for _, row in df_entries.iterrows():
-            title = f"📅 {row['entry_date']} | {row['category']} | 템플릿: {row.get('template_name','')} | 핵심: {row['top_skill']}"
-            with st.expander(title):
-                st.write(f"**기분(1~10)**: {row.get('mood', '')}")
-                st.write(f"**[행동]** {row['behavior']}")
-                st.write(f"**[감정]** {row['emotion']}")
-                st.write(f"**[결과]** {row['result']}")
+render_history(df)
 
-                analysis = safe_json_load(row.get("analysis_json"))
-                meta = (analysis.get("metacognition") or {}) if isinstance(analysis, dict) else {}
+elif page == "📒 메모":
 
-                # 메타인지: 맞춤형 대안행동/성찰 질문
-                if meta:
-                    st.divider()
-                    st.subheader("🧠 메타인지 질문(대안 행동 시뮬레이션)")
-                    cfs = meta.get("counterfactuals") or []
-                    for i, cf in enumerate(cfs[:2], start=1):
-                        st.markdown(f"**대안 행동 {i}**: {cf.get('alt_action','')}")
-                        st.write(f"가능한 변화(가정): {cf.get('expected_outcome_change','')}")
-                        st.info(cf.get("reflection_question", ""))
+render_notes_page(df)
 
-                    if meta.get("blind_spot"):
-                        st.write(f"**놓친 관점(Blind spot)**: {meta.get('blind_spot')}")
-                    if meta.get("next_signal"):
-                        st.write(f"**다음에 감지할 신호(Next signal)**: {meta.get('next_signal')}")
+else:
 
-                st.divider()
-                st.subheader("🌱 성장 루틴 (Top 스킬 2+2)")
+render_debug(df)
 
-                entry_notes = notes_by_entry.get(row["id"], [])
-                if not entry_notes:
-                    st.info("저장된 성장 메모가 없습니다.")
-                    continue
 
-                df_en = pd.DataFrame(entry_notes)
 
-                col_a, col_b = st.columns(2)
 
-                # Practices: 완료/이번주목표 승격
-                with col_a:
-                    st.write("**실천 제안 (Practices)**")
-                    practices = df_en[df_en["note_type"] == "practice"]
-                    if practices.empty:
-                        st.caption("실천 제안이 없어요.")
-                    else:
-                        for _, n in practices.iterrows():
-                            done = bool(int(n.get("is_completed") or 0))
-                            new_done = st.checkbox(n["content"], key=f"p_{n['id']}", value=done)
-                            if new_done != done:
-                                with get_conn() as conn:
-                                    conn.execute(
-                                        "UPDATE growth_notes SET is_completed=? WHERE id=?",
-                                        (1 if new_done else 0, n["id"]),
-                                    )
-                                bump_db_version()
-                                st.rerun()
 
-                            # 3-1: 이번 주 목표로 승격(최대 3개 제한)
-                            is_goal = bool(int(n.get("is_weekly_goal") or 0)) and (n.get("goal_week") == current_week)
-                            goal_toggle = st.checkbox(
-                                "이번 주 목표로 고정",
-                                key=f"goal_{n['id']}",
-                                value=is_goal,
-                            )
-                            if goal_toggle != is_goal:
-                                with get_conn() as conn:
-                                    if goal_toggle:
-                                        cnt = conn.execute(
-                                            "SELECT COUNT(*) FROM growth_notes WHERE is_weekly_goal=1 AND goal_week=?",
-                                            (current_week,),
-                                        ).fetchone()[0]
-                                        if cnt >= 3:
-                                            st.error("이번 주 목표는 최대 3개까지만 가능해요.")
-                                        else:
-                                            conn.execute(
-                                                "UPDATE growth_notes SET is_weekly_goal=1, goal_week=? WHERE id=?",
-                                                (current_week, n["id"]),
-                                            )
-                                    else:
-                                        conn.execute(
-                                            "UPDATE growth_notes SET is_weekly_goal=0, goal_week=NULL WHERE id=?",
-                                            (n["id"],),
-                                        )
-                                    conn.commit()
-                                bump_db_version()
-                                st.rerun()
+def render_new_entry(df: pd.DataFrame):
 
-                # Questions: 답변 메모 + 저장
-                with col_b:
-                    st.write("**성찰 질문 (Questions)**")
-                    questions = df_en[df_en["note_type"] == "question"]
-                    if questions.empty:
-                        st.caption("성찰 질문이 없어요.")
-                    else:
-                        for _, n in questions.iterrows():
-                            st.info(n["content"])
-                            memo = st.text_area(
-                                "답변 메모",
-                                key=f"memo_{n['id']}",
-                                value=n.get("user_memo") or "",
-                                height=80,
-                            )
-                            if st.button("메모 저장", key=f"btn_{n['id']}"):
-                                with get_conn() as conn:
-                                    conn.execute(
-                                        "UPDATE growth_notes SET user_memo=? WHERE id=?",
-                                        (memo, n["id"]),
-                                    )
-                                bump_db_version()
-                                st.success("메모가 저장되었습니다.")
-                                st.rerun()
+st.subheader("✍️ 오늘의 기록 추가")
+
+
+
+st.info("한 박스에 자유롭게 적되, 가능하면 **행동 → 경험한 감정 → 결과** 순서로 써보세요.\n"
+
+"예) 오늘 내가 한 행동 / 그때 느낀 감정 / 결과와 배움")
+
+
+
+col1, col2 = st.columns([1, 1])
+
+with col1:
+
+entry_date = st.date_input("날짜", value=date.today())
+
+cat_choice = st.selectbox(
+
+"카테고리(선택)",
+
+options=["(선택 안 함)"] + CATEGORIES + ["(직접 입력)"],
+
+index=0
+
+)
+
+cat_custom = ""
+
+if cat_choice == "(직접 입력)":
+
+cat_custom = st.text_input("카테고리 직접 입력", placeholder="예: 인턴/현장실습, 개인 프로젝트, 취미 활동 등")
+
+category = None
+
+if cat_choice == "(선택 안 함)":
+
+category = None
+
+elif cat_choice == "(직접 입력)":
+
+category = cat_custom.strip() if cat_custom.strip() else None
+
+else:
+
+category = cat_choice
+
+
+
+with col2:
+
+artifacts = st.text_area(
+
+"증거/자료 링크(선택) — 줄바꿈으로 여러 개",
+
+placeholder="예: Notion 링크, Google Doc, GitHub, 발표자료 URL 등"
+
+)
+
+artifacts_list = [x.strip() for x in (artifacts or "").splitlines() if x.strip()]
+
+
+
+raw_text = st.text_area(
+
+"기록 본문(필수)",
+
+height=260,
+
+placeholder="행동 → 감정 → 결과 순서로 적어보세요.\n(예: 내가 한 행동 / 느낀 감정 / 결과 + 배움)"
+
+)
+
+
+
+st.markdown("### 🔎 분석 옵션")
+
+do_analysis = st.checkbox("저장 후 분석 실행하기", value=True)
+
+top_k = st.slider("유사 기록 힌트(top-k)", min_value=0, max_value=10, value=5)
+
+
+
+if st.button("✅ 저장", type="primary"):
+
+if not (raw_text or "").strip():
+
+st.error("기록 본문은 필수입니다.")
+
+return
+
+
+
+entry_id = str(uuid.uuid4())
+
+created_at = datetime.now().isoformat(timespec="seconds")
+
+entry = {
+
+"id": entry_id,
+
+"created_at": created_at,
+
+"entry_date": entry_date.isoformat(),
+
+"category": category,
+
+"tags": [],
+
+"title": None,
+
+"raw_text": raw_text.strip(),
+
+"artifacts": artifacts_list,
+
+"analysis": {}
+
+}
+
+insert_entry(entry)
+
+st.success("기록을 저장했습니다.")
+
+
+
+if not do_analysis:
+
+return
+
+
+
+# related hints (optional)
+
+related: List[Dict[str, Any]] = []
+
+if top_k > 0 and not df.empty:
+
+sims = get_similar_entries(df, entry["raw_text"], top_k=top_k)
+
+hint_rows: List[Dict[str, Any]] = []
+
+for rid, _score in sims:
+
+r = fetch_entry_by_id(rid)
+
+if r:
+
+hint_rows.append(r)
+
+hint_df = pd.DataFrame(hint_rows) if hint_rows else pd.DataFrame()
+
+if not hint_df.empty:
+
+hint_df["analysis_parsed"] = hint_df["analysis_json"].apply(
+
+lambda x: x if isinstance(x, dict) else (x or {})
+
+)
+
+related = summarize_for_related(hint_df)
+
+
+
+engine = st.session_state.get("engine", DEFAULT_ENGINE)
+
+with st.spinner("분석 중..."):
+
+analysis = run_analysis_engine(engine=engine, entry=entry, related=related)
+
+update_entry_analysis(entry_id, analysis)
+
+
+
+st.success("분석 완료!")
+
+render_analysis_block(analysis)
+
+
+
+# top skill memo editor (기본: top 1개만)
+
+top_skill = get_top_skill_from_analysis(analysis)
+
+if top_skill:
+
+practices, questions = get_growth_items_for_top_skill(analysis)
+
+st.markdown("---")
+
+render_memo_editor_for_skill(
+
+entry_id=entry_id,
+
+entry_date=entry["entry_date"],
+
+skill_name=top_skill,
+
+default_practices=practices,
+
+default_questions=questions
+
+)
+
+
+
+# 옵션: 다른 스킬도 메모하기
+
+other_skills = []
+
+skills = analysis.get("soft_skills") or []
+
+if isinstance(skills, list):
+
+for sk in skills:
+
+if isinstance(sk, dict) and sk.get("name") and sk.get("name") != top_skill:
+
+other_skills.append(sk.get("name"))
+
+if other_skills:
+
+if st.toggle("다른 스킬도 메모하기", value=False, key=f"toggle_other_{entry_id}"):
+
+st.markdown("---")
+
+st.subheader("➕ 다른 스킬 메모")
+
+st.caption("다른 스킬은 기본 템플릿(2+2)로 시작하며, 문구/메모 모두 수정 가능합니다.")
+
+for osk in other_skills:
+
+default_pr = [
+
+f"{osk}을(를) 강화하기 위해, 다음 기록에 '내 행동'을 더 구체적으로 1문장 추가하기",
+
+f"{osk} 관련 결과를 관찰 가능한 표현으로 1문장 추가하기",
+
+][:PRACTICE_N]
+
+default_qs = [
+
+f"오늘 {osk} 관점에서 내가 한 선택의 기준은 무엇이었나?",
+
+f"다음엔 {osk} 관점에서 무엇을 바꾸면 더 좋아질까?",
+
+][:QUESTION_N]
+
+render_memo_editor_for_skill(
+
+entry_id=entry_id,
+
+entry_date=entry["entry_date"],
+
+skill_name=osk,
+
+default_practices=default_pr,
+
+default_questions=default_qs
+
+)
+
+else:
+
+st.info("top 스킬을 결정할 수 없어 메모 섹션을 표시하지 않았습니다. (분석 결과에 soft_skills가 필요합니다.)")
+
+
+
+
+
+def render_history(df: pd.DataFrame):
+
+st.subheader("📚 기록 목록")
+
+if df.empty:
+
+st.info("아직 저장된 기록이 없습니다. '오늘의 기록 추가'에서 작성해보세요.")
+
+return
+
+
+
+colf1, colf2, colf3 = st.columns([1, 1, 2])
+
+with colf1:
+
+cat = st.selectbox("카테고리 필터", options=["(전체)"] + CATEGORIES)
+
+with colf2:
+
+skill_filter = st.selectbox("소프트스킬 필터", options=["(전체)"] + SOFT_SKILLS)
+
+with colf3:
+
+q = st.text_input("검색(본문)", placeholder="예: 발표, 조율, 회복, 기준, 피드백...")
+
+
+
+filtered = df.copy()
+
+
+
+if cat != "(전체)":
+
+filtered = filtered[filtered["category"] == cat]
+
+
+
+if (q or "").strip():
+
+qq = q.strip().lower()
+
+filtered = filtered[filtered["raw_text"].str.lower().str.contains(qq, na=False)]
+
+
+
+if skill_filter != "(전체)":
+
+def has_skill(an):
+
+if not isinstance(an, dict):
+
+return False
+
+skills = an.get("soft_skills", []) or []
+
+return any((s.get("name") == skill_filter) for s in skills if isinstance(s, dict))
+
+filtered = filtered[filtered["analysis_parsed"].apply(has_skill)]
+
+
+
+st.caption(f"총 {len(filtered)}개")
+
+
+
+engine = st.session_state.get("engine", DEFAULT_ENGINE)
+
+
+
+for _, r in filtered.iterrows():
+
+entry_date = r.get("entry_date", "")
+
+category = r.get("category") or "—"
+
+an = r.get("analysis_parsed") or {}
+
+if not isinstance(an, dict):
+
+an = {}
+
+skills = [s.get("name") for s in (an.get("soft_skills") or []) if isinstance(s, dict) and s.get("name")]
+
+skill_text = ", ".join(skills) if skills else "—"
+
+
+
+with st.expander(f"{entry_date} · 카테고리: {category} | 스킬: {skill_text}"):
+
+st.write(r["raw_text"])
+
+
+
+artifacts = r.get("artifacts_parsed") or []
+
+if artifacts:
+
+st.markdown("**증거/링크**")
+
+for a in artifacts:
+
+st.write(f"- {a}")
+
+
+
+st.markdown("---")
+
+if an:
+
+render_analysis_block(an)
+
+else:
+
+st.info("아직 분석 결과가 없습니다. 아래 버튼으로 분석을 실행할 수 있어요.")
+
+
+
+colb1, colb2 = st.columns([1, 1])
+
+with colb1:
+
+if st.button("🤖 이 기록 분석하기", key=f"an_{r['id']}"):
+
+entry = fetch_entry_by_id(r["id"])
+
+if not entry:
+
+st.error("기록을 불러오지 못했습니다.")
+
+else:
+
+other = df[df["id"] != r["id"]].head(80)
+
+related = summarize_for_related(other) if not other.empty else []
+
+payload = {
+
+"id": entry["id"],
+
+"entry_date": entry["entry_date"],
+
+"category": entry.get("category"),
+
+"raw_text": entry["raw_text"],
+
+"artifacts": entry.get("artifacts") or []
+
+}
+
+with st.spinner("분석 중..."):
+
+analysis = run_analysis_engine(engine=engine, entry=payload, related=related)
+
+update_entry_analysis(r["id"], analysis)
+
+st.success("분석 완료! 화면을 갱신합니다.")
+
+st.rerun()
+
+
+
+with colb2:
+
+if st.button("🗑️ 삭제", key=f"del_{r['id']}"):
+
+delete_entry(r["id"])
+
+st.success("삭제했습니다. 화면을 갱신합니다.")
+
+st.rerun()
+
+
+
+# Memo section (분석 결과가 있을 때만)
+
+an_now = r.get("analysis_parsed") or {}
+
+if isinstance(an_now, dict) and an_now.get("soft_skills"):
+
+top_skill = get_top_skill_from_analysis(an_now)
+
+if top_skill:
+
+practices, questions = get_growth_items_for_top_skill(an_now)
+
+st.markdown("---")
+
+render_memo_editor_for_skill(
+
+entry_id=r["id"],
+
+entry_date=r["entry_date"],
+
+skill_name=top_skill,
+
+default_practices=practices,
+
+default_questions=questions
+
+)
+
+
+
+other_skills = []
+
+skills = an_now.get("soft_skills") or []
+
+if isinstance(skills, list):
+
+for sk in skills:
+
+if isinstance(sk, dict) and sk.get("name") and sk.get("name") != top_skill:
+
+other_skills.append(sk.get("name"))
+
+
+
+if other_skills:
+
+if st.toggle("다른 스킬도 메모하기", value=False, key=f"toggle_other_hist_{r['id']}"):
+
+st.markdown("---")
+
+st.subheader("➕ 다른 스킬 메모")
+
+for osk in other_skills:
+
+default_pr = [
+
+f"{osk}을(를) 강화하기 위해, 다음 기록에 '내 행동'을 더 구체적으로 1문장 추가하기",
+
+f"{osk} 관련 결과를 관찰 가능한 표현으로 1문장 추가하기",
+
+][:PRACTICE_N]
+
+default_qs = [
+
+f"오늘 {osk} 관점에서 내가 한 선택의 기준은 무엇이었나?",
+
+f"다음엔 {osk} 관점에서 무엇을 바꾸면 더 좋아질까?",
+
+][:QUESTION_N]
+
+render_memo_editor_for_skill(
+
+entry_id=r["id"],
+
+entry_date=r["entry_date"],
+
+skill_name=osk,
+
+default_practices=default_pr,
+
+default_questions=default_qs
+
+)
+
+
+
+
+
+def render_notes_page(df: pd.DataFrame):
+
+st.subheader("📒 메모")
+
+st.caption("메모는 기록(entry) 기준으로도, 소프트스킬 기준으로도 확인할 수 있어요.")
+
+
+
+tab1, tab2 = st.tabs(["날짜별", "스킬별"])
+
+
+
+with tab1:
+
+# 날짜 선택: entries에서 날짜 목록 생성
+
+dates = sorted(df["entry_date"].dropna().unique().tolist(), reverse=True) if not df.empty else []
+
+if not dates:
+
+st.info("아직 기록/메모가 없습니다.")
+
+else:
+
+d = st.selectbox("날짜 선택", options=dates, index=0)
+
+notes = fetch_skill_notes_by_date(d)
+
+if not notes:
+
+st.info("이 날짜에 저장된 메모가 없습니다.")
+
+else:
+
+# entry_id별 그룹
+
+by_entry: Dict[str, List[Dict[str, Any]]] = {}
+
+for n in notes:
+
+by_entry.setdefault(n["entry_id"], []).append(n)
+
+
+
+for entry_id, ns in by_entry.items():
+
+with st.expander(f"{d} · entry_id: {entry_id[:8]} · 메모 {len(ns)}개"):
+
+# skill별 그룹
+
+by_skill: Dict[str, List[Dict[str, Any]]] = {}
+
+for n in ns:
+
+by_skill.setdefault(n["skill_name"], []).append(n)
+
+for sk, sk_notes in by_skill.items():
+
+st.markdown(f"**{sk}**")
+
+# practice/question 분리 출력
+
+for nt in ["practice", "question"]:
+
+items = [x for x in sk_notes if x["note_type"] == nt]
+
+if not items:
+
+continue
+
+st.caption("연습/루틴" if nt == "practice" else "다음 기록 질문")
+
+for it in sorted(items, key=lambda x: int(x["item_index"])):
+
+st.write(f"- {it['item_text']}")
+
+if (it.get("memo_text") or "").strip():
+
+st.write(f" ↳ 메모: {it['memo_text']}")
+
+
+
+with tab2:
+
+skill = st.selectbox("스킬 선택", options=SOFT_SKILLS, index=0)
+
+notes = fetch_skill_notes_by_skill(skill, limit=300)
+
+if not notes:
+
+st.info("이 스킬에 저장된 메모가 없습니다.")
+
+else:
+
+# entry_date별 그룹
+
+by_date: Dict[str, List[Dict[str, Any]]] = {}
+
+for n in notes:
+
+by_date.setdefault(n["entry_date"], []).append(n)
+
+
+
+for d in sorted(by_date.keys(), reverse=True):
+
+with st.expander(f"{d} · 메모 {len(by_date[d])}개"):
+
+items = by_date[d]
+
+for nt in ["practice", "question"]:
+
+sub = [x for x in items if x["note_type"] == nt]
+
+if not sub:
+
+continue
+
+st.caption("연습/루틴" if nt == "practice" else "다음 기록 질문")
+
+for it in sorted(sub, key=lambda x: int(x["item_index"])):
+
+st.write(f"- {it['item_text']}")
+
+if (it.get("memo_text") or "").strip():
+
+st.write(f" ↳ 메모: {it['memo_text']}")
+
+st.caption(f"entry_id: {it['entry_id'][:8]} · updated: {it['updated_at']}")
+
+
+
+
+
+def render_debug(df: pd.DataFrame):
+
+st.subheader("🧪 디버그/로그")
+
+st.write("현재 DB에 저장된 기록 개수:", len(df))
+
+
+
+st.markdown("### 최근 10개 기록 미리보기")
+
+if not df.empty:
+
+st.dataframe(df[["entry_date", "category"]].head(10), use_container_width=True, hide_index=True)
+
+else:
+
+st.info("기록이 없습니다.")
+
+
+
+st.markdown("### 환경/설정")
+
+st.write({
+
+"engine": st.session_state.get("engine", DEFAULT_ENGINE),
+
+"has_api_key": bool(st.session_state.get("api_key")),
+
+"model": st.session_state.get("model", DEFAULT_MODEL),
+
+"db_path": DB_PATH,
+
+"note_policy": "기본: top 스킬만 2+2 메모. 토글로 다른 스킬 확장.",
+
+})
+
+
+
+# notes count
+
+with get_conn() as conn:
+
+cur = conn.cursor()
+
+cur.execute("SELECT COUNT(*) FROM skill_notes")
+
+note_count = cur.fetchone()[0]
+
+st.write("저장된 메모 개수(skill_notes):", note_count)
+
+
+
+st.info(
+
+"MetaTone 분석은 요약/STAR/패턴요약 없이, 행동·배움 + 스킬 근거/개념 + (top 스킬 기준) 2+2 메모 루틴에 집중합니다."
+
+)
+
+
+
+
 
 if __name__ == "__main__":
-    main()
+
+main()
