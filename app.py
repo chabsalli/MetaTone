@@ -34,16 +34,13 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 # ----------------------------
 
+# ----------------------------
+# OpenAI client (requires openai>=1.0.0)
+# ----------------------------
 try:
-
-from openai import OpenAI
-
+    from openai import OpenAI
 except Exception:
-
-OpenAI = None
-
-
-
+    OpenAI = None
 
 
 # ============================
